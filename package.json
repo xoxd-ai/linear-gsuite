@@ -52,7 +52,7 @@
     "publint": "^0.3.18",
     "tsx": "^4.20.3",
     "typescript": "^5.9.0",
-    "vitest": "^4.0.0"
+    "vitest": "^4.1.11"
   },
   "keywords": [
     "linear",
