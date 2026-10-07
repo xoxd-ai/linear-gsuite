@@ -84,7 +84,7 @@ function syncOptionsFromArgs(args: string[], configRequired: boolean): Effect.Ef
 
 function run(effect: Effect.Effect<void, CliError>) {
   return Effect.runPromise(
-    Effect.catchAll(effect, (error) =>
+    Effect.catch(effect, (error) =>
       Effect.sync(() => {
         console.error(error.message);
         process.exitCode = 1;
