@@ -45,7 +45,7 @@
     "prepublishOnly": "pnpm build && pnpm check:package"
   },
   "dependencies": {
-    "effect": "^3.19.14"
+    "effect": "4.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -70,7 +70,7 @@
   },
   "pnpm": {
     "overrides": {
-      "effect": "^3.19.14"
+      "effect": "4.0.1"
     }
   }
 }

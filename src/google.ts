@@ -244,9 +244,9 @@ function withRetry<A>(label: string, effectFactory: () => Effect.Effect<A, CliEr
   return Effect.gen(function* () {
     let lastError: CliError | undefined;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const exit = yield* Effect.either(effectFactory());
-      if (exit._tag === "Right") return exit.right;
-      lastError = exit.left;
+      const exit = yield* Effect.result(effectFactory());
+      if (exit._tag === "Success") return exit.success;
+      lastError = exit.failure;
       if (attempt < attempts) yield* sleep(attempt * 500);
     }
     return yield* Effect.fail(lastError ?? fail(`${label}: retry exhausted`));
@@ -257,9 +257,9 @@ function apiRequestWithRetry(token: string, method: string, url: string, body: u
   return Effect.gen(function* () {
     let lastResult: ApiResult | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const result = yield* Effect.either(apiRequest(token, method, url, body));
-      if (result._tag === "Right") {
-        lastResult = result.right;
+      const result = yield* Effect.result(apiRequest(token, method, url, body));
+      if (result._tag === "Success") {
+        lastResult = result.success;
         if (lastResult.status === 429 || lastResult.status >= 500) {
           if (attempt < 3) yield* sleep(attempt * 500);
           continue;
@@ -267,7 +267,7 @@ function apiRequestWithRetry(token: string, method: string, url: string, body: u
         return lastResult;
       }
       if (attempt < 3) yield* sleep(attempt * 500);
-      else return yield* Effect.fail(result.left);
+      else return yield* Effect.fail(result.failure);
     }
     return yield* Effect.fail(fail(`Request failed without result: ${method} ${url}`));
   });
@@ -505,8 +505,8 @@ function resolveRuntime(options: SyncOptions, cwd = process.cwd()) {
     const localConfig = yield* loadLocalConfig(options.localConfigFile);
 
     let discoveredOAuthClient = "";
-    const probe = yield* Effect.either(discoverOAuthClientFile(options.oauthClientSecretsFile || localConfig.oauthClientFile || ""));
-    if (probe._tag === "Right") discoveredOAuthClient = probe.right;
+    const probe = yield* Effect.result(discoverOAuthClientFile(options.oauthClientSecretsFile || localConfig.oauthClientFile || ""));
+    if (probe._tag === "Success") discoveredOAuthClient = probe.success;
 
     let authMode: Exclude<AuthMode, "auto">;
     if (options.authMode === "auto") {
