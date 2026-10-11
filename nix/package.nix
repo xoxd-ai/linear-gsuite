@@ -34,7 +34,7 @@ pkgs.stdenv.mkDerivation {
     src = packageSrc;
     inherit pnpm;
     fetcherVersion = 3;
-    hash = "sha256-A5qS/ZnzaUN0OhLXitaM+aUWIs6vI74LWuIAYRTXtRE=";
+    hash = "sha256-lF4VlenLvhFN2vaIZ9YNkq9EV63wP8uBAIolxGJHoVI=";
   };
 
   dontStrip = true;
