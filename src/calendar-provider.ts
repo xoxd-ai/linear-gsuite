@@ -46,6 +46,17 @@ export interface CalendarDiscovery {
   complete: true;
 }
 
+export interface ProviderBusyInterval {
+  start: string;
+  end: string;
+}
+
+export interface ProviderAvailability {
+  calendars: Record<string, { busy: ProviderBusyInterval[] }>;
+  timeMin?: string;
+  timeMax?: string;
+}
+
 export interface CalendarWindow {
   calendarId: string;
   timeMin: string;
@@ -81,6 +92,7 @@ export class CalendarProviderError extends CliError {
 export interface GoogleCalendarProviderOptions {
   accessToken: () => Effect.Effect<string, CliError>;
   calendarIds: readonly string[];
+  availabilityCalendarIds?: readonly string[];
   jessEmail: string;
   cadeCreatorEmails?: readonly string[];
   fetch?: typeof fetch;
@@ -89,6 +101,17 @@ export interface GoogleCalendarProviderOptions {
 const API = "https://www.googleapis.com/calendar/v3";
 const MAX_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
 const MAX_EVENTS = 1000;
+
+function explicitInstant(value: unknown): number {
+  const match = typeof value === "string" && /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!match) throw fail("Calendar availability requires valid explicit ISO times");
+  const [, year, month, day, hour, minute, second, , offsetHour, offsetMinute] = match;
+  const y = Number(year), m = Number(month), d = Number(day);
+  const days = new Date(Date.UTC(y < 100 ? y + 2000 : y, m, 0)).getUTCDate();
+  const instant = Date.parse(value as string);
+  if (m < 1 || m > 12 || d < 1 || d > days || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59 || Number(offsetHour ?? 0) > 23 || Number(offsetMinute ?? 0) > 59 || !Number.isFinite(instant)) throw fail("Calendar availability requires valid explicit ISO times");
+  return instant;
+}
 
 function validateWindow(start: string, end: string) {
   if (!/(Z|[+-]\d{2}:\d{2})$/.test(start) || !/(Z|[+-]\d{2}:\d{2})$/.test(end)) {
@@ -119,6 +142,7 @@ export function privateGoogleEventId(idempotencyKey: string) {
 export function createGoogleCalendarProvider(options: GoogleCalendarProviderOptions) {
   const transport = options.fetch ?? fetch;
   const allowed = new Set(options.calendarIds);
+  const availabilityAllowed = new Set(options.availabilityCalendarIds ?? options.calendarIds);
   const jessEmail = options.jessEmail.trim().toLowerCase();
   const cadeCreators = new Set((options.cadeCreatorEmails ?? []).map(email => email.trim().toLowerCase()).filter(Boolean));
 
@@ -239,17 +263,36 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
 
   function freeBusy(input: { calendarIds: readonly string[]; timeMin: string; timeMax: string }) {
     return Effect.gen(function* () {
-      yield* checked(() => {
+      const window = yield* checked(() => {
         validateWindow(input.timeMin, input.timeMax);
-        if (!input.calendarIds.length || input.calendarIds.length > 50 || input.calendarIds.some(id => !allowed.has(id))) throw fail("Calendar is outside the configured allowlist");
+        const start = explicitInstant(input.timeMin), end = explicitInstant(input.timeMax);
+        if (!Array.isArray(input.calendarIds) || !input.calendarIds.length || input.calendarIds.length > 50 || new Set(input.calendarIds).size !== input.calendarIds.length || input.calendarIds.some(id => typeof id !== "string" || !id || !availabilityAllowed.has(id))) throw fail("Calendar is outside the configured availability allowlist or repeated");
+        return { start, end };
       });
       const raw = yield* request("POST", "/freeBusy", { timeMin: input.timeMin, timeMax: input.timeMax, items: input.calendarIds.map(id => ({ id })) });
-      return yield* checked(() => {
-        const calendars = raw.calendars as Record<string, { busy?: unknown; errors?: unknown[] }> | undefined;
-        for (const id of input.calendarIds) {
-          if (!calendars?.[id] || calendars[id].errors?.length || !Array.isArray(calendars[id].busy)) throw fail("Calendar availability incomplete; do not infer free time");
+      return yield* checked((): ProviderAvailability => {
+        const incomplete = () => { throw fail("Calendar availability incomplete; do not infer free time"); };
+        const calendars = raw.calendars;
+        if (!calendars || typeof calendars !== "object" || Array.isArray(calendars) || raw.error !== undefined || raw.errors !== undefined) incomplete();
+        for (const key of ["timeMin", "timeMax"] as const) {
+          if (raw[key] !== undefined && explicitInstant(raw[key]) !== (key === "timeMin" ? window.start : window.end)) incomplete();
         }
-        return raw;
+        const rows = input.calendarIds.map(id => {
+          if (!Object.prototype.hasOwnProperty.call(calendars, id)) return incomplete();
+          const row = (calendars as Record<string, unknown>)[id];
+          if (!row || typeof row !== "object" || Array.isArray(row)) return incomplete();
+          const { busy, errors } = row as { busy?: unknown; errors?: unknown };
+          if (errors !== undefined && (!Array.isArray(errors) || errors.length > 0) || !Array.isArray(busy)) return incomplete();
+          const intervals = (busy as unknown[]).map(item => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) return incomplete();
+            const { start, end } = item as { start?: unknown; end?: unknown };
+            const a = explicitInstant(start), b = explicitInstant(end);
+            if (a >= b || a < window.start || b > window.end) return incomplete();
+            return { start: start as string, end: end as string };
+          });
+          return [id, { busy: intervals }] as const;
+        });
+        return { calendars: Object.fromEntries(rows), ...(raw.timeMin === undefined ? {} : { timeMin: raw.timeMin as string }), ...(raw.timeMax === undefined ? {} : { timeMax: raw.timeMax as string }) };
       });
     });
   }

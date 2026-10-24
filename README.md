@@ -160,3 +160,14 @@ and rejects `attendeesOmitted` partial participant metadata. A private calendar
 default alone does not attest private event visibility.
 
 The typed assistant provider also exposes `listCalendarMetadata({maxPages?, maxCalendars?})` for explicit account-calendar discovery. It follows every page (including hidden/deleted entries), projects only IDs/access/timezone/flags, and fails rather than returning a partial result on pagination errors or configured safety bounds. Discovery does not expand event allowlists or confer write authority. Default bounds128 pages/10000 calendars are configurable operational limits. Names and event contents are not requested. [Google CalendarList list contract](https://developers.google.com/workspace/calendar/api/v3/reference/calendarList/list).
+
+### Availability-only calendar access
+
+`createGoogleCalendarProvider` accepts optional `availabilityCalendarIds`,
+defaulting to `calendarIds`. Only `freeBusy` uses that allowlist; event detail
+reads and writes still require `calendarIds`. `freeBusy` returns exported
+`ProviderAvailability` / `ProviderBusyInterval` data containing requested IDs
+and validated start/end intervals only. It rejects repeated/foreign IDs,
+incomplete/error rows, invalid explicit timestamps, nonpositive/out-of-window
+intervals and mismatched returned window bounds. Missing response bounds remain
+omitted, preserving existing callers.

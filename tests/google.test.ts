@@ -528,6 +528,42 @@ describe("bounded assistant calendar provider", () => {
     transport.mockImplementation(async () => jsonResponse({ calendars: { primary: { busy: [] } } }));
     expect(await Effect.runPromise(provider(transport).freeBusy(window))).toEqual({ calendars: { primary: { busy: [] } } });
   });
+  it("separates busy-only access from event detail and projects availability fields", async () => {
+    const transport = vi.fn(async () => jsonResponse({ kind: "private-extra", timeMin: times.start, timeMax: times.end, calendars: { busyOnly: { busy: [{ start: times.start, end: times.end, summary: "excluded" }], privateField: "excluded" }, foreign: { busy: [] } } }));
+    const api = createGoogleCalendarProvider({ accessToken: () => Effect.succeed("test-token"), calendarIds: ["primary"], availabilityCalendarIds: ["primary", "busyOnly"], jessEmail: "jess@example.test", fetch: transport });
+    expect(await Effect.runPromise(api.freeBusy({ calendarIds: ["busyOnly"], timeMin: times.start, timeMax: times.end }))).toEqual({ timeMin: times.start, timeMax: times.end, calendars: { busyOnly: { busy: [{ start: times.start, end: times.end }] } } });
+    await expect(Effect.runPromise(api.get("busyOnly", "event"))).rejects.toThrow("allowlist");
+    await expect(Effect.runPromise(api.list({ calendarId: "busyOnly", timeMin: times.start, timeMax: times.end }))).rejects.toThrow("allowlist");
+    await expect(Effect.runPromise(api.createPrivate({ ...input, calendarId: "busyOnly" }))).rejects.toThrow("allowlist");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    {}, { calendars: {} }, { calendars: [] },
+    { calendars: { primary: { busy: [], errors: {} } } },
+    { calendars: { primary: { busy: [], errors: [{ reason: "forbidden" }] } } },
+    { calendars: { primary: { busy: {} } } },
+    { calendars: { primary: { busy: [null] } } },
+    { calendars: { primary: { busy: [{ start: "2026-02-30T10:00:00Z", end: times.end }] } } },
+    { calendars: { primary: { busy: [{ start: "2026-10-24T10:00:00", end: times.end }] } } },
+    { calendars: { primary: { busy: [{ start: times.end, end: times.start }] } } },
+    { calendars: { primary: { busy: [{ start: times.start, end: times.start }] } } },
+    { calendars: { primary: { busy: [{ start: "2020-01-01T00:00:00Z", end: times.end }] } } },
+    { calendars: { primary: { busy: [] } }, timeMin: "2020-01-01T00:00:00Z" },
+    { calendars: { primary: { busy: [] } }, timeMax: "bad" },
+    { calendars: { primary: { busy: [] } }, error: { reason: "forbidden" } }
+  ])("rejects incomplete or malformed availability %#", async response => {
+    const transport = vi.fn(async () => jsonResponse(response));
+    await expect(Effect.runPromise(provider(transport).freeBusy({ calendarIds: ["primary"], timeMin: times.start, timeMax: times.end }))).rejects.toThrow();
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("rejects foreign, repeated and oversized availability requests before transport", async () => {
+    const transport = vi.fn(async () => jsonResponse({}));
+    for (const calendarIds of [[], ["foreign"], ["primary", "primary"], Array(51).fill("primary")]) {
+      await expect(Effect.runPromise(provider(transport).freeBusy({ calendarIds, timeMin: times.start, timeMax: times.end }))).rejects.toThrow("allowlist");
+    }
+    await expect(Effect.runPromise(provider(transport).freeBusy({ calendarIds: ["primary"], timeMin: "2026-02-30T10:00:00Z", timeMax: "2026-03-03T10:00:00Z" }))).rejects.toThrow("ISO");
+    expect(transport).not.toHaveBeenCalled();
+  });
   it("bounds reads, checks calendar allowlists, and paginates", async () => {
     const transport = vi.fn(async () => jsonResponse(transport.mock.calls.length === 1 ? { items: [owned()], nextPageToken: "next" } : { items: [owned({ id: "event-2" })] }));
     const api = provider(transport);
