@@ -666,6 +666,28 @@ export function authStatus(options: {
   });
 }
 
+export function persistOAuthLoginConfig(patch: Partial<LocalConfig>, file: string) {
+  return Effect.gen(function* () {
+    const symlink = yield* effectSync("inspect local config", () => {
+      try { return fs.lstatSync(expandHome(file)).isSymbolicLink(); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+    });
+    if (symlink) {
+      console.warn(`OAuth token saved; managed config left unchanged: ${file}. Keep its declared OAuth paths aligned with the saved token.`);
+      return false;
+    }
+    const result = yield* Effect.result(saveLocalConfig(patch, file));
+    if (result._tag === "Failure") {
+      console.warn(`OAuth token saved; local config could not be updated: ${file}. Update its OAuth paths before unattended use.`);
+      return false;
+    }
+    return true;
+  });
+}
+
 export function authLogin(options: {
   clientSecretsFile?: string;
   tokenFile?: string;
@@ -698,7 +720,7 @@ export function authLogin(options: {
     };
 
     yield* writeJsonFile(tokenFile, token);
-    yield* saveLocalConfig(
+    yield* persistOAuthLoginConfig(
       {
         authMode: "user",
         oauthClientFile: clientSecretsFile,
@@ -719,7 +741,7 @@ export function authLogin(options: {
     const count = Array.isArray((result.data as Record<string, unknown>).items)
       ? ((result.data as Record<string, unknown>).items as unknown[]).length
       : 0;
-    console.log("Google Calendar desktop OAuth is configured.");
+    console.log("Google Calendar desktop OAuth token and API access verified.");
     console.log(`Saved token: ${tokenFile}`);
     console.log(`Accessible calendars: ${count}`);
   });
