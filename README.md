@@ -154,3 +154,7 @@ or the existing event ID (rescheduling) before another write. The adapter never
 automatically retries ambiguous writes. Provider errors do not include response
 bodies or credentials. Existing source projections retain their source ownership
 and reconciliation behavior; assistant events use a separate `source: cade`.
+
+The bounded automatic-move policy requires explicit existing private visibility
+and rejects `attendeesOmitted` partial participant metadata. A private calendar
+default alone does not attest private event visibility.

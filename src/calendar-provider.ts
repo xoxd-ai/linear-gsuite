@@ -22,6 +22,7 @@ export interface ProviderEvent {
   creator?: { email?: string; self?: boolean };
   organizer?: { email?: string; self?: boolean };
   attendees?: unknown[];
+  attendeesOmitted?: boolean;
   recurrence?: string[];
   recurringEventId?: string;
   start?: { dateTime?: string; date?: string; timeZone?: string };
@@ -218,7 +219,7 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
       });
       return yield* checked(() => {
         const found = event(input.calendarId, raw);
-        if (input.reminders !== undefined && (found.reminders?.useDefault !== false || reminderIdentity(found.reminders.overrides ?? []) !== reminderIdentity(input.reminders)) || found.status === "cancelled" || found.attendees?.length || found.location?.trim() || found.recurrence?.length || found.recurringEventId || found.eventType && found.eventType !== "default" || found.start?.date || found.end?.date || found.start?.timeZone !== input.timeZone || found.end?.timeZone !== input.timeZone || found.eventId !== key || found.visibility !== "private" || found.extendedProperties?.private?.request_id !== key || found.extendedProperties?.private?.source !== "cade" || found.summary !== input.summary || (found.description ?? "") !== (input.description ?? "") || Date.parse(found.start?.dateTime ?? "") !== Date.parse(input.start) || Date.parse(found.end?.dateTime ?? "") !== Date.parse(input.end)) {
+        if (input.reminders !== undefined && (found.reminders?.useDefault !== false || reminderIdentity(found.reminders.overrides ?? []) !== reminderIdentity(input.reminders)) || found.status === "cancelled" || found.attendeesOmitted === true || found.attendees?.length || found.location?.trim() || found.recurrence?.length || found.recurringEventId || found.eventType && found.eventType !== "default" || found.start?.date || found.end?.date || found.start?.timeZone !== input.timeZone || found.end?.timeZone !== input.timeZone || found.eventId !== key || found.visibility !== "private" || found.extendedProperties?.private?.request_id !== key || found.extendedProperties?.private?.source !== "cade" || found.summary !== input.summary || (found.description ?? "") !== (input.description ?? "") || Date.parse(found.start?.dateTime ?? "") !== Date.parse(input.start) || Date.parse(found.end?.dateTime ?? "") !== Date.parse(input.end)) {
           throw new CalendarProviderError("conflict", "Existing event does not match the private idempotent request");
         }
         return found;
@@ -242,7 +243,7 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
         if (current.start?.date || current.end?.date || !Number.isFinite(originalDuration) || originalDuration <= 0 || originalDuration !== Date.parse(input.end) - Date.parse(input.start) || current.start?.timeZone !== input.timeZone || current.end?.timeZone !== input.timeZone) {
           throw new CalendarProviderError("rejected", "Event requires review: preserve timed-event duration and original explicit timezone");
         }
-        if (!owned || current.attendees?.length || current.location?.trim() || current.recurrence?.length || current.recurringEventId || current.status === "cancelled" || current.eventType && current.eventType !== "default" || source && source !== "cade" || /\b(travel|flight|train|airport|drive|commute|appointment|in[- ]person)\b/i.test(`${current.summary ?? ""} ${current.description ?? ""}`)) {
+        if (!owned || current.visibility !== "private" || current.attendeesOmitted === true || current.attendees?.length || current.location?.trim() || current.recurrence?.length || current.recurringEventId || current.status === "cancelled" || current.eventType && current.eventType !== "default" || source && source !== "cade" || /\b(travel|flight|train|airport|drive|commute|appointment|in[- ]person)\b/i.test(`${current.summary ?? ""} ${current.description ?? ""}`)) {
           throw new CalendarProviderError("rejected", "Event requires review: only owned solo non-travel events without physical locations or recurrence can move automatically");
         }
       });
