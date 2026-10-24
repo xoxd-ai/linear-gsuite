@@ -220,7 +220,7 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
         const creator = current.creator?.email?.toLowerCase();
         const organizer = current.organizer?.email?.toLowerCase();
         const ownedByJess = !!jessEmail && creator === jessEmail && organizer === jessEmail;
-        const ownedByCade = !!creator && creator === organizer && cadeCreators.has(creator) && source === "cade" && current.extendedProperties?.private?.request_id === current.eventId;
+        const ownedByCade = !!creator && (creator === organizer || !!jessEmail && organizer === jessEmail) && cadeCreators.has(creator) && source === "cade" && current.extendedProperties?.private?.request_id === current.eventId;
         const owned = ownedByJess || ownedByCade;
         const originalDuration = Date.parse(current.end?.dateTime ?? "") - Date.parse(current.start?.dateTime ?? "");
         if (current.start?.date || current.end?.date || !Number.isFinite(originalDuration) || originalDuration <= 0 || originalDuration !== Date.parse(input.end) - Date.parse(input.start) || current.start?.timeZone !== input.timeZone || current.end?.timeZone !== input.timeZone) {

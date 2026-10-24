@@ -419,8 +419,8 @@ describe("bounded assistant calendar provider", () => {
     await expect(Effect.runPromise(provider(transport).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }))).rejects.toThrow("preserve timed-event duration");
     expect(transport).toHaveBeenCalledTimes(1);
   });
-  it("permits an explicit Cade creator only with matching ownership metadata", async () => {
-    const ownership = { creator: { email: "cade@example.test" }, organizer: { email: "cade@example.test" }, extendedProperties: { private: { source: "cade", request_id: "event-1" } } };
+  it.each(["cade@example.test", "jess@example.test"])("permits an explicit Cade creator only with matching ownership metadata and organizer %s", async organizer => {
+    const ownership = { creator: { email: "cade@example.test" }, organizer: { email: organizer }, extendedProperties: { private: { source: "cade", request_id: "event-1" } } };
     const transport = vi.fn(async (_url: unknown, init?: RequestInit) => jsonResponse(init?.method === "PATCH" ? owned({ ...ownership, ...JSON.parse(init.body as string), etag: '"v2"' }) : owned(ownership)));
     expect((await Effect.runPromise(provider(transport).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }))).etag).toBe('"v2"');
     const foreign = vi.fn(async () => jsonResponse(owned({ ...ownership, extendedProperties: { private: { source: "cade", request_id: "other-event" } } })));
