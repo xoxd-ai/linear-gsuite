@@ -1,0 +1,10 @@
+{
+  "effectModuleRelativePath": "lib/linear-gsuite/node_modules/effect/dist/index.js",
+  "narHash": "sha256-P46Jh2RKYH3CxcTwXst+RJYM1bKNRGkVI3cDNoJJmnE=",
+  "nodeMajor": 22,
+  "providerModuleRelativePath": "lib/linear-gsuite/dist/index.js",
+  "schemaVersion": 1,
+  "sourceCommit": "9eab75363ac3378dac087aade7f4b068860c74be",
+  "sourceRepo": "xoxd-ai/linear-gsuite",
+  "storePath": "/nix/store/3xlnif57llmfyl572a4d6vp6grsrw34b-linear-gsuite-0.1.0-dev+9eab753"
+}
