@@ -567,6 +567,7 @@ function buildEventResource(definition: LoadedCalendarDefinition, event: Resolve
   const googleEventId = stableGoogleEventId(event.identityKey);
   const base = {
     id: googleEventId,
+    visibility: "private",
     summary: event.summary,
     description: event.description,
     recurrence: event.recurrence.length > 0 ? event.recurrence : undefined,

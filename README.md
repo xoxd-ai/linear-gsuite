@@ -113,3 +113,37 @@ CI runs typecheck, test, build, and publint on every PR.
 ## License
 
 MIT
+
+
+### Private assistant calendar adapter
+
+`createGoogleCalendarProvider` exposes Effect-backed `get`, `list`, `freeBusy`,
+`createPrivate`, and `reschedule` operations for a caller-supplied calendar
+allowlist. Supply `accessToken: () => Effect.Effect<string, CliError>` and
+`jessEmail`; existing `refreshUserAccessToken` can resolve the token. No CLI
+command or background service activates these operations automatically.
+
+Reads require explicit offset timestamps, with windows of at most 31 days and
+at most 1,000 events. Incomplete availability responses fail rather than implying
+free time. Results retain provider identity, ETag and iCalUID when present.
+
+`createPrivate` takes `calendarId`, `idempotencyKey`, `summary`, optional
+`description`, `start`, `end`, and `timeZone`. It uses a stable provider identity
+from `privateGoogleEventId(idempotencyKey)` and verifies duplicate-request
+payloads. Calendar projection and assistant creation both set actual Google
+`visibility: private`; private extended properties alone do not provide privacy.
+
+`reschedule` takes `calendarId`, `eventId`, the last observed `etag`, `start`,
+`end`, and `timeZone`. It fetches the latest event, then patches times with
+`If-Match`. Only events created and organized by the configured Jess identity
+can move automatically. Events with attendees, locations, travel/appointment
+wording, recurrence, non-default types, or another projection owner need review.
+The caller must supply that review workflow; this adapter never bypasses it.
+
+`CalendarProviderError.code` distinguishes conflicts, missing events, rejected
+requests, read failures and unknown write outcomes. An unknown write outcome
+must be reconciled with `get(calendarId, privateGoogleEventId(key))` (creation)
+or the existing event ID (rescheduling) before another write. The adapter never
+automatically retries ambiguous writes. Provider errors do not include response
+bodies or credentials. Existing source projections retain their source ownership
+and reconciliation behavior; assistant events use a separate `source: cade`.

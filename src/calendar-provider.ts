@@ -1,0 +1,234 @@
+import { Effect } from "effect";
+import { stableGoogleEventId } from "./google.js";
+import { CliError, fail } from "./utils.js";
+
+export interface ProviderEvent {
+  calendarId: string;
+  eventId: string;
+  etag: string;
+  iCalUID?: string;
+  visibility?: string;
+  summary?: string;
+  description?: string;
+  location?: string;
+  status?: string;
+  eventType?: string;
+  creator?: { email?: string; self?: boolean };
+  organizer?: { email?: string; self?: boolean };
+  attendees?: unknown[];
+  recurrence?: string[];
+  recurringEventId?: string;
+  start?: { dateTime?: string; date?: string; timeZone?: string };
+  end?: { dateTime?: string; date?: string; timeZone?: string };
+  extendedProperties?: { private?: Record<string, string> };
+}
+
+export interface CalendarWindow {
+  calendarId: string;
+  timeMin: string;
+  timeMax: string;
+}
+
+export interface PrivateEventInput {
+  calendarId: string;
+  idempotencyKey: string;
+  summary: string;
+  description?: string;
+  start: string;
+  end: string;
+  timeZone: string;
+}
+
+export interface RescheduleInput {
+  calendarId: string;
+  eventId: string;
+  etag: string;
+  start: string;
+  end: string;
+  timeZone: string;
+}
+
+export class CalendarProviderError extends CliError {
+  constructor(readonly code: "conflict" | "unknown-outcome" | "rejected" | "read-failed" | "not-found", message: string, readonly status?: number) {
+    super(message);
+  }
+}
+
+export interface GoogleCalendarProviderOptions {
+  accessToken: () => Effect.Effect<string, CliError>;
+  calendarIds: readonly string[];
+  jessEmail: string;
+  fetch?: typeof fetch;
+}
+
+const API = "https://www.googleapis.com/calendar/v3";
+const MAX_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
+const MAX_EVENTS = 1000;
+
+function validateWindow(start: string, end: string) {
+  if (!/(Z|[+-]\d{2}:\d{2})$/.test(start) || !/(Z|[+-]\d{2}:\d{2})$/.test(end)) {
+    throw fail("Calendar times require an explicit UTC offset");
+  }
+  const duration = Date.parse(end) - Date.parse(start);
+  if (!Number.isFinite(duration) || duration <= 0 || duration > MAX_WINDOW_MS) {
+    throw fail("Calendar window must be positive and at most 31 days");
+  }
+}
+
+function validateTimes(input: { start: string; end: string; timeZone: string }) {
+  validateWindow(input.start, input.end);
+  new Intl.DateTimeFormat("en", { timeZone: input.timeZone });
+}
+
+export function privateGoogleEventId(idempotencyKey: string) {
+  return stableGoogleEventId(`cade:${idempotencyKey}`);
+}
+
+export function createGoogleCalendarProvider(options: GoogleCalendarProviderOptions) {
+  const transport = options.fetch ?? fetch;
+  const allowed = new Set(options.calendarIds);
+  const jessEmail = options.jessEmail.trim().toLowerCase();
+
+  function checked<A>(fn: () => A) {
+    return Effect.try({ try: fn, catch: error => error instanceof CliError ? error : fail("Invalid calendar input") });
+  }
+
+  function eventPath(calendarId: string, eventId?: string) {
+    if (!allowed.has(calendarId)) throw fail("Calendar is outside the configured allowlist");
+    if (eventId === "") throw fail("Event identity is required");
+    return `/calendars/${encodeURIComponent(calendarId)}/events${eventId === undefined ? "" : `/${encodeURIComponent(eventId)}`}`;
+  }
+
+  function request(method: string, path: string, body?: unknown, etag?: string) {
+    return Effect.gen(function* () {
+      const token = yield* options.accessToken();
+      return yield* Effect.tryPromise({
+        try: async () => {
+          const write = method !== "GET" && path !== "/freeBusy";
+          let response: Response;
+          try {
+            response = await transport(`${API}${path}`, {
+              method,
+              headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(etag ? { "If-Match": etag } : {}) },
+              body: body === undefined ? undefined : JSON.stringify(body),
+              signal: AbortSignal.timeout(20_000)
+            });
+          } catch {
+            throw new CalendarProviderError(write ? "unknown-outcome" : "read-failed", write ? "Calendar write outcome unknown; reconcile by event identity before retry" : "Calendar read failed");
+          }
+          if (!response.ok) {
+            throw new CalendarProviderError(response.status === 404 ? "not-found" : response.status === 412 ? "conflict" : response.status === 409 ? "conflict" : write && response.status >= 500 ? "unknown-outcome" : "rejected", `Calendar request failed (${response.status})`, response.status);
+          }
+          try { return await response.json() as Record<string, unknown>; }
+          catch { throw new CalendarProviderError(write ? "unknown-outcome" : "read-failed", "Calendar response unreadable; reconcile before retrying writes"); }
+        },
+        catch: error => error instanceof CliError ? error : fail("Calendar request failed")
+      });
+    });
+  }
+
+  function event(calendarId: string, raw: Record<string, unknown>) {
+    if (typeof raw.id !== "string" || typeof raw.etag !== "string") throw fail("Calendar response lacks identity or revision");
+    return { ...raw, calendarId, eventId: raw.id, etag: raw.etag } as ProviderEvent;
+  }
+
+  function get(calendarId: string, eventId: string) {
+    return Effect.gen(function* () {
+      const path = yield* checked(() => eventPath(calendarId, eventId));
+      const raw = yield* request("GET", path);
+      return yield* checked(() => event(calendarId, raw));
+    });
+  }
+
+  function list(input: CalendarWindow) {
+    return Effect.gen(function* () {
+      const path = yield* checked(() => { validateWindow(input.timeMin, input.timeMax); return eventPath(input.calendarId); });
+      const result: ProviderEvent[] = [];
+      let pageToken: string | undefined;
+      let pages = 0;
+      do {
+        if (++pages > 20) return yield* Effect.fail(fail("Calendar pagination limit exceeded; narrow the window"));
+        const params = new URLSearchParams({ timeMin: input.timeMin, timeMax: input.timeMax, singleEvents: "true", orderBy: "startTime", maxResults: "250" });
+        if (pageToken) params.set("pageToken", pageToken);
+        const raw = yield* request("GET", `${path}?${params}`);
+        const items = yield* checked(() => {
+          if (raw.items !== undefined && !Array.isArray(raw.items)) throw fail("Invalid calendar event list");
+          return (raw.items ?? []) as Record<string, unknown>[];
+        });
+        for (const item of items) result.push(yield* checked(() => event(input.calendarId, item)));
+        pageToken = typeof raw.nextPageToken === "string" ? raw.nextPageToken : undefined;
+        if (result.length > MAX_EVENTS || pageToken && result.length >= MAX_EVENTS) return yield* Effect.fail(fail("Calendar result limit exceeded; narrow the window"));
+      } while (pageToken);
+      return result;
+    });
+  }
+
+  function freeBusy(input: { calendarIds: readonly string[]; timeMin: string; timeMax: string }) {
+    return Effect.gen(function* () {
+      yield* checked(() => {
+        validateWindow(input.timeMin, input.timeMax);
+        if (!input.calendarIds.length || input.calendarIds.length > 50 || input.calendarIds.some(id => !allowed.has(id))) throw fail("Calendar is outside the configured allowlist");
+      });
+      const raw = yield* request("POST", "/freeBusy", { timeMin: input.timeMin, timeMax: input.timeMax, items: input.calendarIds.map(id => ({ id })) });
+      return yield* checked(() => {
+        const calendars = raw.calendars as Record<string, { busy?: unknown; errors?: unknown[] }> | undefined;
+        for (const id of input.calendarIds) {
+          if (!calendars?.[id] || calendars[id].errors?.length || !Array.isArray(calendars[id].busy)) throw fail("Calendar availability incomplete; do not infer free time");
+        }
+        return raw;
+      });
+    });
+  }
+
+  function createPrivate(input: PrivateEventInput) {
+    return Effect.gen(function* () {
+      const path = yield* checked(() => {
+        validateTimes(input);
+        if (!input.idempotencyKey.trim() || !input.summary.trim()) throw fail("Event summary and idempotency key are required");
+        return eventPath(input.calendarId);
+      });
+      const key = privateGoogleEventId(input.idempotencyKey);
+      const resource = {
+        id: key, visibility: "private", summary: input.summary, description: input.description ?? "",
+        start: { dateTime: input.start, timeZone: input.timeZone }, end: { dateTime: input.end, timeZone: input.timeZone },
+        extendedProperties: { private: { source: "cade", request_id: key } }
+      };
+      const write = request("POST", `${path}?sendUpdates=none`, resource);
+      const raw = yield* Effect.catch(write, error => {
+        if (!(error instanceof CalendarProviderError) || error.code !== "conflict") return Effect.fail(error);
+        return request("GET", `${path}/${key}`);
+      });
+      return yield* checked(() => {
+        const found = event(input.calendarId, raw);
+        if (found.eventId !== key || found.visibility !== "private" || found.extendedProperties?.private?.request_id !== key || found.extendedProperties?.private?.source !== "cade" || found.summary !== input.summary || (found.description ?? "") !== (input.description ?? "") || Date.parse(found.start?.dateTime ?? "") !== Date.parse(input.start) || Date.parse(found.end?.dateTime ?? "") !== Date.parse(input.end)) {
+          throw new CalendarProviderError("conflict", "Existing event does not match the private idempotent request");
+        }
+        return found;
+      });
+    });
+  }
+
+  function reschedule(input: RescheduleInput) {
+    return Effect.gen(function* () {
+      yield* checked(() => { validateTimes(input); if (!input.etag) throw fail("Event revision is required"); });
+      const current = yield* get(input.calendarId, input.eventId);
+      yield* checked(() => {
+        if (current.etag !== input.etag) throw new CalendarProviderError("conflict", "Calendar event changed; refresh before rescheduling");
+        const source = current.extendedProperties?.private?.source;
+        const owned = !!jessEmail && current.creator?.email?.toLowerCase() === jessEmail && current.organizer?.email?.toLowerCase() === jessEmail;
+        if (!owned || current.attendees?.length || current.location?.trim() || current.recurrence?.length || current.recurringEventId || current.status === "cancelled" || current.eventType && current.eventType !== "default" || source && source !== "cade" || /\b(travel|flight|train|airport|drive|commute|appointment|in[- ]person)\b/i.test(`${current.summary ?? ""} ${current.description ?? ""}`)) {
+          throw new CalendarProviderError("rejected", "Event requires review: only owned solo non-travel events without physical locations or recurrence can move automatically");
+        }
+      });
+      const path = yield* checked(() => eventPath(input.calendarId, input.eventId));
+      const raw = yield* request("PATCH", `${path}?sendUpdates=none`, { visibility: "private", start: { dateTime: input.start, timeZone: input.timeZone }, end: { dateTime: input.end, timeZone: input.timeZone } }, input.etag);
+      return yield* checked(() => {
+        const updated = event(input.calendarId, raw);
+        if (updated.visibility !== "private" || updated.eventId !== input.eventId || Date.parse(updated.start?.dateTime ?? "") !== Date.parse(input.start) || Date.parse(updated.end?.dateTime ?? "") !== Date.parse(input.end)) throw new CalendarProviderError("unknown-outcome", "Calendar write requires private visibility readback");
+        return updated;
+      });
+    });
+  }
+
+  return { get, list, freeBusy, createPrivate, reschedule };
+}

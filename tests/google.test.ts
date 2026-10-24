@@ -4,6 +4,7 @@ import path from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { reconcileStaleEvents, stableGoogleEventId, syncCalendar } from "../src/google.js";
+import { createGoogleCalendarProvider } from "../src/calendar-provider.js";
 
 function writeJson(file: string, value: unknown) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -126,6 +127,8 @@ describe("google calendar sync", () => {
       }, tempDir)
     );
 
+    const projectionWrite = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT");
+    expect(JSON.parse(projectionWrite?.[1]?.body as string).visibility).toBe("private");
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/events/already-deleted-duplicate?sendUpdates=none"),
       expect.objectContaining({ method: "DELETE" })
@@ -366,5 +369,87 @@ describe("google calendar sync", () => {
     await Effect.runPromise(syncCalendar(syncOptions(t), t.tempDir));
     expect(listCallCount).toBeGreaterThanOrEqual(2);
     expect(deletedIds).toContain("lgs-stale-page2");
+  });
+});
+
+
+describe("bounded assistant calendar provider", () => {
+  const times = { start: "2026-10-25T10:00:00-04:00", end: "2026-10-25T10:30:00-04:00", timeZone: "America/New_York" };
+  const input = { calendarId: "primary", idempotencyKey: "task-1", summary: "Answer Cade", ...times };
+  function provider(fetchMock: ReturnType<typeof vi.fn>) {
+    return createGoogleCalendarProvider({ accessToken: () => Effect.succeed("test-token"), calendarIds: ["primary"], jessEmail: "jess@example.test", fetch: fetchMock });
+  }
+  function owned(extra: Record<string, unknown> = {}) {
+    return { id: "event-1", etag: '"v1"', visibility: "private", creator: { email: "jess@example.test" }, organizer: { email: "jess@example.test" }, summary: "Focus", ...extra };
+  }
+  it("creates private events with stable identity and reconciles duplicate retries", async () => {
+    let created: Record<string, unknown> = {};
+    const transport = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        if (Object.keys(created).length) return jsonResponse({}, 409);
+        created = { ...JSON.parse(init.body as string), etag: '"v1"', iCalUID: "uid-1" };
+      }
+      return jsonResponse(created);
+    });
+    const api = provider(transport);
+    const first = await Effect.runPromise(api.createPrivate(input));
+    const second = await Effect.runPromise(api.createPrivate(input));
+    expect(first.eventId).toBe(stableGoogleEventId("cade:task-1"));
+    expect(second).toEqual(first);
+    expect(first.visibility).toBe("private");
+    expect(first.iCalUID).toBe("uid-1");
+    await expect(Effect.runPromise(api.createPrivate({ ...input, summary: "Different task" }))).rejects.toThrow("does not match");
+  });
+  it("preserves event identity and guards updates with If-Match", async () => {
+    const transport = vi.fn(async (_url: unknown, init?: RequestInit) => jsonResponse(init?.method === "PATCH" ? owned({ ...JSON.parse(init.body as string), etag: '"v2"' }) : owned()));
+    const result = await Effect.runPromise(provider(transport).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }));
+    expect(result.etag).toBe('"v2"');
+    const [, init] = transport.mock.calls[1]!;
+    expect(init?.method).toBe("PATCH");
+    expect(init?.headers).toMatchObject({ "If-Match": '"v1"' });
+    expect(JSON.parse(init?.body as string)).not.toHaveProperty("summary");
+  });
+  it.each([
+    { attendees: [{ email: "other@example.test" }] },
+    { location: "Studio" },
+    { summary: "Flight to Boston" },
+    { recurrence: ["RRULE:FREQ=WEEKLY"] },
+    { recurringEventId: "series" },
+    { creator: { email: "other@example.test" } },
+    { organizer: { email: "other@example.test" } },
+    { extendedProperties: { private: { source: "linear-gsuite" } } }
+  ])("does not move protected events %j", async extra => {
+    const transport = vi.fn(async () => jsonResponse(owned(extra)));
+    await expect(Effect.runPromise(provider(transport).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }))).rejects.toThrow("requires review");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("does not overwrite a concurrent modification", async () => {
+    const transport = vi.fn(async (_url: unknown, init?: RequestInit) => jsonResponse(init?.method === "PATCH" ? {} : owned(), init?.method === "PATCH" ? 412 : 200));
+    await expect(Effect.runPromise(provider(transport).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }))).rejects.toThrow("412");
+    const stale = vi.fn(async () => jsonResponse(owned({ etag: '"v2"' })));
+    await expect(Effect.runPromise(provider(stale).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }))).rejects.toThrow("changed");
+    expect(stale).toHaveBeenCalledTimes(1);
+  });
+  it("exposes unknown outcomes without automatically replaying writes", async () => {
+    const transport = vi.fn(async () => { throw new Error("network failure"); });
+    await expect(Effect.runPromise(provider(transport).createPrivate(input))).rejects.toThrow("outcome unknown");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("does not interpret incomplete freebusy results as free time", async () => {
+    const window = { calendarIds: ["primary"], timeMin: times.start, timeMax: times.end };
+    const transport = vi.fn(async () => jsonResponse({ calendars: { primary: { errors: [{ reason: "notFound" }] } } }));
+    await expect(Effect.runPromise(provider(transport).freeBusy(window))).rejects.toThrow("do not infer free time");
+    transport.mockImplementation(async () => jsonResponse({ calendars: { primary: { busy: [] } } }));
+    expect(await Effect.runPromise(provider(transport).freeBusy(window))).toEqual({ calendars: { primary: { busy: [] } } });
+  });
+  it("bounds reads, checks calendar allowlists, and paginates", async () => {
+    const transport = vi.fn(async () => jsonResponse(transport.mock.calls.length === 1 ? { items: [owned()], nextPageToken: "next" } : { items: [owned({ id: "event-2" })] }));
+    const api = provider(transport);
+    const window = { calendarId: "primary", timeMin: times.start, timeMax: times.end };
+    expect(await Effect.runPromise(api.list(window))).toHaveLength(2);
+    expect(String(transport.mock.calls[1]?.[0])).toContain("pageToken=next");
+    await expect(Effect.runPromise(api.list({ ...window, calendarId: "unknown" }))).rejects.toThrow("allowlist");
+    await expect(Effect.runPromise(api.list({ ...window, timeMax: "2027-01-01T00:00:00Z" }))).rejects.toThrow("31 days");
+    expect(transport).toHaveBeenCalledTimes(2);
   });
 });
