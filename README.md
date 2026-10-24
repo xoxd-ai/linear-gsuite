@@ -171,3 +171,15 @@ and validated start/end intervals only. It rejects repeated/foreign IDs,
 incomplete/error rows, invalid explicit timestamps, nonpositive/out-of-window
 intervals and mismatched returned window bounds. Missing response bounds remain
 omitted, preserving existing callers.
+
+`CalendarAvailabilityPartialError` still rejects `freeBusy` when valid per-calendar
+API error rows occur, while exposing only validated resolved rows through
+`partialAvailability` and the unresolved requested IDs through
+`unresolvedCalendarIds`. Missing/malformed rows remain generic failures. Consumers
+must explicitly validate fallback permission; unresolved calendars are never free.
+
+`listAvailability(CalendarWindow)` uses the event-detail allowlist and requests
+only availability fields, with complete bounded pagination and no ETag
+requirement. Exported `ProviderAvailabilityEvent` rows preserve all-day, floating
+and unresolved temporal data for conservative consumer normalization, excluding
+titles, attendees and descriptions. Existing full-detail methods are unchanged.
