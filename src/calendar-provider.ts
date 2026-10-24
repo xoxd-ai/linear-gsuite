@@ -2,12 +2,18 @@ import { Effect } from "effect";
 import { stableGoogleEventId } from "./google.js";
 import { CliError, fail } from "./utils.js";
 
+export interface CalendarReminder {
+  method: "popup" | "email";
+  minutes: number;
+}
+
 export interface ProviderEvent {
   calendarId: string;
   eventId: string;
   etag: string;
   iCalUID?: string;
   visibility?: string;
+  reminders?: { useDefault?: boolean; overrides?: CalendarReminder[] };
   summary?: string;
   description?: string;
   location?: string;
@@ -34,6 +40,7 @@ export interface PrivateEventInput {
   idempotencyKey: string;
   summary: string;
   description?: string;
+  reminders?: CalendarReminder[];
   start: string;
   end: string;
   timeZone: string;
@@ -79,6 +86,13 @@ function validateWindow(start: string, end: string) {
 function validateTimes(input: { start: string; end: string; timeZone: string }) {
   validateWindow(input.start, input.end);
   new Intl.DateTimeFormat("en", { timeZone: input.timeZone });
+}
+
+function reminderIdentity(reminders: readonly CalendarReminder[]) {
+  if (!Array.isArray(reminders) || reminders.length > 5 || reminders.some(reminder => !reminder || !["popup", "email"].includes(reminder.method) || !Number.isInteger(reminder.minutes) || reminder.minutes < 0 || reminder.minutes > 40320)) {
+    throw fail("Calendar reminders require at most 5 popup/email overrides with integer minutes from 0 to 40320");
+  }
+  return reminders.map(reminder => `${reminder.method}:${reminder.minutes}`).sort().join(",");
 }
 
 export function privateGoogleEventId(idempotencyKey: string) {
@@ -186,12 +200,14 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
     return Effect.gen(function* () {
       const path = yield* checked(() => {
         validateTimes(input);
+        if (input.reminders !== undefined) reminderIdentity(input.reminders);
         if (!input.idempotencyKey.trim() || !input.summary.trim()) throw fail("Event summary and idempotency key are required");
         return eventPath(input.calendarId);
       });
       const key = privateGoogleEventId(input.idempotencyKey);
       const resource = {
         id: key, visibility: "private", summary: input.summary, description: input.description ?? "",
+        ...(input.reminders === undefined ? {} : { reminders: { useDefault: false, overrides: input.reminders } }),
         start: { dateTime: input.start, timeZone: input.timeZone }, end: { dateTime: input.end, timeZone: input.timeZone },
         extendedProperties: { private: { source: "cade", request_id: key } }
       };
@@ -202,7 +218,7 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
       });
       return yield* checked(() => {
         const found = event(input.calendarId, raw);
-        if (found.status === "cancelled" || found.attendees?.length || found.location?.trim() || found.recurrence?.length || found.recurringEventId || found.eventType && found.eventType !== "default" || found.start?.date || found.end?.date || found.start?.timeZone !== input.timeZone || found.end?.timeZone !== input.timeZone || found.eventId !== key || found.visibility !== "private" || found.extendedProperties?.private?.request_id !== key || found.extendedProperties?.private?.source !== "cade" || found.summary !== input.summary || (found.description ?? "") !== (input.description ?? "") || Date.parse(found.start?.dateTime ?? "") !== Date.parse(input.start) || Date.parse(found.end?.dateTime ?? "") !== Date.parse(input.end)) {
+        if (input.reminders !== undefined && (found.reminders?.useDefault !== false || reminderIdentity(found.reminders.overrides ?? []) !== reminderIdentity(input.reminders)) || found.status === "cancelled" || found.attendees?.length || found.location?.trim() || found.recurrence?.length || found.recurringEventId || found.eventType && found.eventType !== "default" || found.start?.date || found.end?.date || found.start?.timeZone !== input.timeZone || found.end?.timeZone !== input.timeZone || found.eventId !== key || found.visibility !== "private" || found.extendedProperties?.private?.request_id !== key || found.extendedProperties?.private?.source !== "cade" || found.summary !== input.summary || (found.description ?? "") !== (input.description ?? "") || Date.parse(found.start?.dateTime ?? "") !== Date.parse(input.start) || Date.parse(found.end?.dateTime ?? "") !== Date.parse(input.end)) {
           throw new CalendarProviderError("conflict", "Existing event does not match the private idempotent request");
         }
         return found;

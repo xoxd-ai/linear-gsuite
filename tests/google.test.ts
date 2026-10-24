@@ -400,6 +400,27 @@ describe("bounded assistant calendar provider", () => {
     expect(first.iCalUID).toBe("uid-1");
     await expect(Effect.runPromise(api.createPrivate({ ...input, summary: "Different task" }))).rejects.toThrow("does not match");
   });
+  it("sets bounded reminders and verifies their idempotent readback", async () => {
+    let created: Record<string, unknown> = {};
+    const transport = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") created = { ...JSON.parse(init.body as string), etag: '\"v1\"' };
+      return jsonResponse(created);
+    });
+    const api = provider(transport);
+    const request = { ...input, reminders: [{ method: "popup" as const, minutes: 5 }, { method: "email" as const, minutes: 60 }] };
+    expect((await Effect.runPromise(api.createPrivate(request))).reminders).toEqual({ useDefault: false, overrides: request.reminders });
+    transport.mockImplementation(async (_url: unknown, init?: RequestInit) => init?.method === "POST" ? jsonResponse({}, 409) : jsonResponse({ ...created, reminders: { useDefault: true } }));
+    await expect(Effect.runPromise(api.createPrivate(request))).rejects.toThrow("does not match");
+  });
+  it.each([
+    [{ method: "sms", minutes: 5 }], [{ method: "popup", minutes: -1 }],
+    [{ method: "email", minutes: 40321 }], [{ method: "popup", minutes: 1.5 }],
+    Array.from({ length: 6 }, () => ({ method: "popup", minutes: 5 }))
+  ])("rejects invalid reminder overrides %j", async (...reminders) => {
+    const transport = vi.fn();
+    await expect(Effect.runPromise(provider(transport).createPrivate({ ...input, reminders: reminders as { method: "popup"; minutes: number }[] }))).rejects.toThrow("at most 5");
+    expect(transport).not.toHaveBeenCalled();
+  });
   it.each([
     { status: "cancelled" },
     { attendees: [{ email: "other@example.test" }] },

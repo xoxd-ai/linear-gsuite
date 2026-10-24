@@ -128,7 +128,11 @@ at most 1,000 events. Incomplete availability responses fail rather than implyin
 free time. Results retain provider identity, ETag and iCalUID when present.
 
 `createPrivate` takes `calendarId`, `idempotencyKey`, `summary`, optional
-`description`, `start`, `end`, and `timeZone`. It uses a stable provider identity
+`description`, `start`, `end`, and `timeZone`. Optional `reminders` accepts up to
+five `{ method: "popup" | "email", minutes: integer }` overrides (0–40320
+minutes). Explicit overrides disable calendar defaults and must match provider
+readback. Omitting them retains calendar defaults; provider acceptance alone does
+not establish device alarm delivery. It uses a stable provider identity
 from `privateGoogleEventId(idempotencyKey)` and verifies duplicate-request
 payloads. Calendar projection and assistant creation both set actual Google
 `visibility: private`; private extended properties alone do not provide privacy.
