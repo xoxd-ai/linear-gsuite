@@ -382,6 +382,42 @@ describe("bounded assistant calendar provider", () => {
   function owned(extra: Record<string, unknown> = {}) {
     return { id: "event-1", etag: '"v1"', visibility: "private", creator: { email: "jess@example.test" }, organizer: { email: "jess@example.test" }, summary: "Focus", start: { dateTime: "2026-10-24T10:00:00-04:00", timeZone: "America/New_York" }, end: { dateTime: "2026-10-24T10:30:00-04:00", timeZone: "America/New_York" }, ...extra };
   }
+  it("discovers every metadata page including hidden calendars without names or event contents", async () => {
+    const transport = vi.fn(async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      expect(parsed.pathname).toBe("/calendar/v3/users/me/calendarList");
+      expect(init?.method).toBe("GET");
+      expect(parsed.searchParams.get("showHidden")).toBe("true");
+      expect(parsed.searchParams.get("showDeleted")).toBe("true");
+      expect(parsed.searchParams.get("fields")).not.toMatch(/summary|description/);
+      return parsed.searchParams.has("pageToken")
+        ? jsonResponse({ items: [{ id: "hidden", accessRole: "freeBusyReader", hidden: true, summary: "Private name" }] })
+        : jsonResponse({ items: [{ id: "actual-primary", accessRole: "owner", primary: true, timeZone: "America/New_York", selected: true, summary: "Private name" }], nextPageToken: "page2" });
+    });
+    const result = await Effect.runPromise(provider(transport).listCalendarMetadata());
+    expect(result.complete).toBe(true); expect(result.pages).toBe(2);
+    expect(result.calendars).toEqual([
+      { id: "actual-primary", accessRole: "owner", timeZone: "America/New_York", primary: true, hidden: false, selected: true, deleted: false },
+      { id: "hidden", accessRole: "freeBusyReader", primary: false, hidden: true, selected: false, deleted: false }
+    ]);
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    { first: { items: [], nextPageToken: "same" }, second: { items: [], nextPageToken: "same" }, bounds: {}, error: "pagination" },
+    { first: { items: [{ id: "one", accessRole: "owner" }], nextPageToken: "next" }, second: { items: [{ id: "one", accessRole: "owner" }] }, bounds: {}, error: "repeated" },
+    { first: { items: [], nextPageToken: "next" }, second: {}, bounds: { maxPages: 1 }, error: "page bound" },
+    { first: { items: [{ id: "one", accessRole: "owner" }, { id: "two", accessRole: "reader" }] }, second: {}, bounds: { maxCalendars: 1 }, error: "calendar bound" },
+    { first: { items: [{ id: "one", accessRole: "unknown" }] }, second: {}, bounds: {}, error: "role" },
+    { first: { items: [{ id: "gone", deleted: true, accessRole: "unknown" }] }, second: {}, bounds: {}, error: "role" },
+    { first: {}, second: {}, bounds: {}, error: "item list" }
+  ])("fails discovery closed instead of presenting incomplete metadata: $error", async ({ first, second, bounds, error }) => {
+    const transport = vi.fn().mockResolvedValueOnce(jsonResponse(first)).mockResolvedValueOnce(jsonResponse(second));
+    await expect(Effect.runPromise(provider(transport).listCalendarMetadata(bounds))).rejects.toThrow(error);
+  });
+  it("does not return partial discovery after a later page fails", async () => {
+    const transport = vi.fn().mockResolvedValueOnce(jsonResponse({ items: [{ id: "one", accessRole: "owner" }], nextPageToken: "next" })).mockResolvedValueOnce(jsonResponse({}, 403));
+    await expect(Effect.runPromise(provider(transport).listCalendarMetadata())).rejects.toThrow("403");
+  });
   it("creates private events with stable identity and reconciles duplicate retries", async () => {
     let created: Record<string, unknown> = {};
     const transport = vi.fn(async (_url: unknown, init?: RequestInit) => {

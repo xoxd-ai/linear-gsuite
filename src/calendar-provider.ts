@@ -30,6 +30,22 @@ export interface ProviderEvent {
   extendedProperties?: { private?: Record<string, string> };
 }
 
+export interface CalendarMetadata {
+  id: string;
+  accessRole?: "none" | "freeBusyReader" | "reader" | "writer" | "writerWithoutPrivateAccess" | "owner";
+  timeZone?: string;
+  primary: boolean;
+  hidden: boolean;
+  selected: boolean;
+  deleted: boolean;
+}
+
+export interface CalendarDiscovery {
+  calendars: CalendarMetadata[];
+  pages: number;
+  complete: true;
+}
+
 export interface CalendarWindow {
   calendarId: string;
   timeMin: string;
@@ -141,6 +157,47 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
         },
         catch: error => error instanceof CliError ? error : fail("Calendar request failed")
       });
+    });
+  }
+
+  function listCalendarMetadata(bounds: { maxPages?: number; maxCalendars?: number } = {}) {
+    return Effect.gen(function* () {
+      const limits = yield* checked(() => {
+        const maxPages = bounds.maxPages ?? 128;
+        const maxCalendars = bounds.maxCalendars ?? 10000;
+        if (![maxPages, maxCalendars].every(value => Number.isSafeInteger(value) && value > 0)) throw fail("Invalid calendar discovery bounds");
+        return { maxPages, maxCalendars };
+      });
+      const calendars: CalendarMetadata[] = [];
+      const ids = new Set<string>();
+      const tokens = new Set<string>();
+      let pageToken: string | undefined;
+      let pages = 0;
+      do {
+        if (pages >= limits.maxPages) return yield* Effect.fail(new CalendarProviderError("read-failed", "Calendar discovery incomplete: page bound exceeded"));
+        const query = new URLSearchParams({ maxResults: "250", showHidden: "true", showDeleted: "true", fields: "items(id,accessRole,timeZone,primary,hidden,selected,deleted),nextPageToken" });
+        if (pageToken) query.set("pageToken", pageToken);
+        const raw = yield* request("GET", `/users/me/calendarList?${query}`);
+        const page = yield* checked(() => {
+          if (!Array.isArray(raw.items)) throw fail("Calendar discovery lacks an item list");
+          const result: CalendarMetadata[] = [];
+          for (const item of raw.items) {
+            if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id || item.id.length > 1024 || ids.has(item.id)) throw fail("Calendar discovery identity is missing or repeated");
+            if ((item.deleted !== true || item.accessRole !== undefined) && !["none", "freeBusyReader", "reader", "writer", "writerWithoutPrivateAccess", "owner"].includes(item.accessRole)) throw fail("Calendar discovery access role is unresolved");
+            for (const flag of ["primary", "hidden", "selected", "deleted"]) if (item[flag] !== undefined && typeof item[flag] !== "boolean") throw fail("Invalid calendar metadata flag");
+            if (item.timeZone !== undefined) { if (typeof item.timeZone !== "string") throw fail("Invalid calendar timezone"); new Intl.DateTimeFormat("en", { timeZone: item.timeZone }); }
+            ids.add(item.id);
+            result.push({ id: item.id, ...(item.accessRole === undefined ? {} : { accessRole: item.accessRole }), ...(item.timeZone === undefined ? {} : { timeZone: item.timeZone }), primary: item.primary === true, hidden: item.hidden === true, selected: item.selected === true, deleted: item.deleted === true });
+          }
+          if (calendars.length + result.length > limits.maxCalendars) throw fail("Calendar discovery incomplete: calendar bound exceeded");
+          if (raw.nextPageToken !== undefined && (typeof raw.nextPageToken !== "string" || !raw.nextPageToken || raw.nextPageToken.length > 8192 || tokens.has(raw.nextPageToken))) throw fail("Calendar discovery pagination is invalid or repeated");
+          return { items: result, nextPageToken: raw.nextPageToken as string | undefined };
+        });
+        calendars.push(...page.items); pages++;
+        pageToken = page.nextPageToken;
+        if (pageToken) tokens.add(pageToken);
+      } while (pageToken);
+      return { calendars, pages, complete: true } satisfies CalendarDiscovery;
     });
   }
 
@@ -257,5 +314,5 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
     });
   }
 
-  return { get, list, freeBusy, createPrivate, reschedule };
+  return { get, list, freeBusy, createPrivate, reschedule, listCalendarMetadata };
 }
