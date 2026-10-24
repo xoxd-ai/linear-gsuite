@@ -58,6 +58,7 @@ export interface GoogleCalendarProviderOptions {
   accessToken: () => Effect.Effect<string, CliError>;
   calendarIds: readonly string[];
   jessEmail: string;
+  cadeCreatorEmails?: readonly string[];
   fetch?: typeof fetch;
 }
 
@@ -88,6 +89,7 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
   const transport = options.fetch ?? fetch;
   const allowed = new Set(options.calendarIds);
   const jessEmail = options.jessEmail.trim().toLowerCase();
+  const cadeCreators = new Set((options.cadeCreatorEmails ?? []).map(email => email.trim().toLowerCase()).filter(Boolean));
 
   function checked<A>(fn: () => A) {
     return Effect.try({ try: fn, catch: error => error instanceof CliError ? error : fail("Invalid calendar input") });
@@ -200,7 +202,7 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
       });
       return yield* checked(() => {
         const found = event(input.calendarId, raw);
-        if (found.eventId !== key || found.visibility !== "private" || found.extendedProperties?.private?.request_id !== key || found.extendedProperties?.private?.source !== "cade" || found.summary !== input.summary || (found.description ?? "") !== (input.description ?? "") || Date.parse(found.start?.dateTime ?? "") !== Date.parse(input.start) || Date.parse(found.end?.dateTime ?? "") !== Date.parse(input.end)) {
+        if (found.status === "cancelled" || found.attendees?.length || found.location?.trim() || found.recurrence?.length || found.recurringEventId || found.eventType && found.eventType !== "default" || found.start?.date || found.end?.date || found.start?.timeZone !== input.timeZone || found.end?.timeZone !== input.timeZone || found.eventId !== key || found.visibility !== "private" || found.extendedProperties?.private?.request_id !== key || found.extendedProperties?.private?.source !== "cade" || found.summary !== input.summary || (found.description ?? "") !== (input.description ?? "") || Date.parse(found.start?.dateTime ?? "") !== Date.parse(input.start) || Date.parse(found.end?.dateTime ?? "") !== Date.parse(input.end)) {
           throw new CalendarProviderError("conflict", "Existing event does not match the private idempotent request");
         }
         return found;
@@ -215,7 +217,15 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
       yield* checked(() => {
         if (current.etag !== input.etag) throw new CalendarProviderError("conflict", "Calendar event changed; refresh before rescheduling");
         const source = current.extendedProperties?.private?.source;
-        const owned = !!jessEmail && current.creator?.email?.toLowerCase() === jessEmail && current.organizer?.email?.toLowerCase() === jessEmail;
+        const creator = current.creator?.email?.toLowerCase();
+        const organizer = current.organizer?.email?.toLowerCase();
+        const ownedByJess = !!jessEmail && creator === jessEmail && organizer === jessEmail;
+        const ownedByCade = !!creator && creator === organizer && cadeCreators.has(creator) && source === "cade" && current.extendedProperties?.private?.request_id === current.eventId;
+        const owned = ownedByJess || ownedByCade;
+        const originalDuration = Date.parse(current.end?.dateTime ?? "") - Date.parse(current.start?.dateTime ?? "");
+        if (current.start?.date || current.end?.date || !Number.isFinite(originalDuration) || originalDuration <= 0 || originalDuration !== Date.parse(input.end) - Date.parse(input.start) || current.start?.timeZone !== input.timeZone || current.end?.timeZone !== input.timeZone) {
+          throw new CalendarProviderError("rejected", "Event requires review: preserve timed-event duration and original explicit timezone");
+        }
         if (!owned || current.attendees?.length || current.location?.trim() || current.recurrence?.length || current.recurringEventId || current.status === "cancelled" || current.eventType && current.eventType !== "default" || source && source !== "cade" || /\b(travel|flight|train|airport|drive|commute|appointment|in[- ]person)\b/i.test(`${current.summary ?? ""} ${current.description ?? ""}`)) {
           throw new CalendarProviderError("rejected", "Event requires review: only owned solo non-travel events without physical locations or recurrence can move automatically");
         }

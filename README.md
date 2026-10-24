@@ -136,7 +136,10 @@ payloads. Calendar projection and assistant creation both set actual Google
 `reschedule` takes `calendarId`, `eventId`, the last observed `etag`, `start`,
 `end`, and `timeZone`. It fetches the latest event, then patches times with
 `If-Match`. Only events created and organized by the configured Jess identity
-can move automatically. Events with attendees, locations, travel/appointment
+can move automatically. Explicit `cadeCreatorEmails` additionally admit those
+service identities only with matching Cade event ownership metadata. All-day
+events, changes of duration, and missing or changed original timezone require
+review. Events with attendees, locations, travel/appointment
 wording, recurrence, non-default types, or another projection owner need review.
 The caller must supply that review workflow; this adapter never bypasses it.
 

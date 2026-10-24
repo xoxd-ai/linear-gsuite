@@ -377,10 +377,10 @@ describe("bounded assistant calendar provider", () => {
   const times = { start: "2026-10-25T10:00:00-04:00", end: "2026-10-25T10:30:00-04:00", timeZone: "America/New_York" };
   const input = { calendarId: "primary", idempotencyKey: "task-1", summary: "Answer Cade", ...times };
   function provider(fetchMock: ReturnType<typeof vi.fn>) {
-    return createGoogleCalendarProvider({ accessToken: () => Effect.succeed("test-token"), calendarIds: ["primary"], jessEmail: "jess@example.test", fetch: fetchMock });
+    return createGoogleCalendarProvider({ accessToken: () => Effect.succeed("test-token"), calendarIds: ["primary"], jessEmail: "jess@example.test", cadeCreatorEmails: ["cade@example.test"], fetch: fetchMock });
   }
   function owned(extra: Record<string, unknown> = {}) {
-    return { id: "event-1", etag: '"v1"', visibility: "private", creator: { email: "jess@example.test" }, organizer: { email: "jess@example.test" }, summary: "Focus", ...extra };
+    return { id: "event-1", etag: '"v1"', visibility: "private", creator: { email: "jess@example.test" }, organizer: { email: "jess@example.test" }, summary: "Focus", start: { dateTime: "2026-10-24T10:00:00-04:00", timeZone: "America/New_York" }, end: { dateTime: "2026-10-24T10:30:00-04:00", timeZone: "America/New_York" }, ...extra };
   }
   it("creates private events with stable identity and reconciles duplicate retries", async () => {
     let created: Record<string, unknown> = {};
@@ -399,6 +399,33 @@ describe("bounded assistant calendar provider", () => {
     expect(first.visibility).toBe("private");
     expect(first.iCalUID).toBe("uid-1");
     await expect(Effect.runPromise(api.createPrivate({ ...input, summary: "Different task" }))).rejects.toThrow("does not match");
+  });
+  it.each([
+    { status: "cancelled" },
+    { attendees: [{ email: "other@example.test" }] },
+    { eventType: "outOfOffice" },
+    { start: { dateTime: times.start, timeZone: "US/Eastern" } }
+  ])("rejects a tombstoned or changed idempotent event %j", async extra => {
+    const transport = vi.fn(async (_url: unknown, init?: RequestInit) => init?.method === "POST" ? jsonResponse({}, 409) : jsonResponse({ id: stableGoogleEventId("cade:task-1"), etag: '"v1"', visibility: "private", summary: input.summary, description: "", start: { dateTime: times.start, timeZone: times.timeZone }, end: { dateTime: times.end, timeZone: times.timeZone }, extendedProperties: { private: { source: "cade", request_id: stableGoogleEventId("cade:task-1") } }, ...extra }));
+    await expect(Effect.runPromise(provider(transport).createPrivate(input))).rejects.toThrow("does not match");
+  });
+  it.each([
+    { start: { date: "2026-10-24" }, end: { date: "2026-10-25" } },
+    { end: { dateTime: "2026-10-24T11:00:00-04:00", timeZone: "America/New_York" } },
+    { start: { dateTime: "2026-10-24T10:00:00-04:00" } },
+    { start: { dateTime: "2026-10-24T10:00:00-04:00", timeZone: "America/Detroit" } }
+  ])("preserves all-day type, original duration and timezone %j", async extra => {
+    const transport = vi.fn(async () => jsonResponse(owned(extra)));
+    await expect(Effect.runPromise(provider(transport).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }))).rejects.toThrow("preserve timed-event duration");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("permits an explicit Cade creator only with matching ownership metadata", async () => {
+    const ownership = { creator: { email: "cade@example.test" }, organizer: { email: "cade@example.test" }, extendedProperties: { private: { source: "cade", request_id: "event-1" } } };
+    const transport = vi.fn(async (_url: unknown, init?: RequestInit) => jsonResponse(init?.method === "PATCH" ? owned({ ...ownership, ...JSON.parse(init.body as string), etag: '"v2"' }) : owned(ownership)));
+    expect((await Effect.runPromise(provider(transport).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }))).etag).toBe('"v2"');
+    const foreign = vi.fn(async () => jsonResponse(owned({ ...ownership, extendedProperties: { private: { source: "cade", request_id: "other-event" } } })));
+    await expect(Effect.runPromise(provider(foreign).reschedule({ calendarId: "primary", eventId: "event-1", etag: '"v1"', ...times }))).rejects.toThrow("requires review");
+    expect(foreign).toHaveBeenCalledTimes(1);
   });
   it("preserves event identity and guards updates with If-Match", async () => {
     const transport = vi.fn(async (_url: unknown, init?: RequestInit) => jsonResponse(init?.method === "PATCH" ? owned({ ...JSON.parse(init.body as string), etag: '"v2"' }) : owned()));
