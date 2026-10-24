@@ -61,7 +61,7 @@ it("does not report login success when the real Calendar probe rejects the saved
  const root = temp(); const client = path.join(root, "client.json"); const token = path.join(root, "token.json"); const config = path.join(root, "config.json");
  fs.writeFileSync(client, JSON.stringify({ installed: { client_id: "synthetic-client", redirect_uris: ["http://127.0.0.1"] } }));
  fs.writeFileSync(config, JSON.stringify({ oauthClientManagedFile: client }));
- const fetchMock = vi.fn(async (url: string | URL | Request) => new Response(JSON.stringify(String(url).includes("oauth2.googleapis.com") ? { access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 3600 } : { error: "synthetic-probe-rejection" }), { status: String(url).includes("oauth2.googleapis.com") ? 200 : 403, headers: { "content-type": "application/json" } }));
+ const fetchMock = vi.fn(async (url: string | URL | Request) => new Response(JSON.stringify(new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).origin === "https://oauth2.googleapis.com" ? { access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 3600 } : { error: "synthetic-probe-rejection" }), { status: new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).origin === "https://oauth2.googleapis.com" ? 200 : 403, headers: { "content-type": "application/json" } }));
  vi.stubGlobal("fetch", fetchMock);
  const log = vi.spyOn(console, "log").mockImplementation((message: unknown) => {
   const text = String(message); const start = text.indexOf("https://accounts.google.com/");
