@@ -423,6 +423,7 @@ describe("bounded assistant calendar provider", () => {
   });
   it.each([
     { status: "cancelled" },
+    { attendeesOmitted: true },
     { attendees: [{ email: "other@example.test" }] },
     { eventType: "outOfOffice" },
     { start: { dateTime: times.start, timeZone: "US/Eastern" } }
@@ -458,6 +459,7 @@ describe("bounded assistant calendar provider", () => {
     expect(JSON.parse(init?.body as string)).not.toHaveProperty("summary");
   });
   it.each([
+    { visibility: "public" }, { visibility: "default" }, { attendeesOmitted: true },
     { attendees: [{ email: "other@example.test" }] },
     { location: "Studio" },
     { summary: "Flight to Boston" },
