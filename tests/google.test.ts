@@ -4,7 +4,7 @@ import path from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { reconcileStaleEvents, stableGoogleEventId, syncCalendar } from "../src/google.js";
-import { createGoogleCalendarProvider } from "../src/calendar-provider.js";
+import { CalendarAvailabilityPartialError, createGoogleCalendarProvider } from "../src/calendar-provider.js";
 
 function writeJson(file: string, value: unknown) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -562,6 +562,55 @@ describe("bounded assistant calendar provider", () => {
       await expect(Effect.runPromise(provider(transport).freeBusy({ calendarIds, timeMin: times.start, timeMax: times.end }))).rejects.toThrow("allowlist");
     }
     await expect(Effect.runPromise(provider(transport).freeBusy({ calendarIds: ["primary"], timeMin: "2026-02-30T10:00:00Z", timeMax: "2026-03-03T10:00:00Z" }))).rejects.toThrow("ISO");
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("exposes only validated resolved rows in a typed partial availability error", async () => {
+    const transport = vi.fn(async () => jsonResponse({ calendars: { primary: { busy: [{ start: times.start, end: times.end }], secret: "excluded" }, unresolved: { busy: [], errors: [{ domain: "global", reason: "notFound", message: "excluded" }] }, foreign: { busy: [] } } }));
+    const api = createGoogleCalendarProvider({ accessToken: () => Effect.succeed("test-token"), calendarIds: ["primary", "unresolved"], jessEmail: "jess@example.test", fetch: transport });
+    const error = await Effect.runPromise(api.freeBusy({ calendarIds: ["primary", "unresolved"], timeMin: times.start, timeMax: times.end })).catch(error => error);
+    expect(error).toBeInstanceOf(CalendarAvailabilityPartialError);
+    expect(error.kind).toBe("calendar-availability-partial");
+    expect(error.code).toBe("read-failed");
+    expect(error.unresolvedCalendarIds).toEqual(["unresolved"]);
+    expect(error.partialAvailability).toEqual({ calendars: { primary: { busy: [{ start: times.start, end: times.end }] } } });
+    expect(error.message).not.toContain("unresolved:");
+    expect(error.message).not.toContain("notFound");
+  });
+  it.each([
+    { busy: [{ start: times.end, end: times.start }] },
+    { busy: [] },
+    { busy: [], errors: [{ reason: "notFound" }] },
+    { busy: [{ start: times.start, end: times.end }], errors: [{ domain: "global", reason: "notFound" }] }
+  ])("does not expose partial availability when any row is malformed or missing %#", async row => {
+    const transport = vi.fn(async () => jsonResponse({ calendars: { unresolved: { errors: [{ domain: "global", reason: "notFound" }] }, ...(row.errors === undefined && row.busy.length === 0 ? {} : { primary: row }) } }));
+    const api = createGoogleCalendarProvider({ accessToken: () => Effect.succeed("test-token"), calendarIds: ["unresolved", "primary"], jessEmail: "jess@example.test", fetch: transport });
+    const error = await Effect.runPromise(api.freeBusy({ calendarIds: ["unresolved", "primary"], timeMin: times.start, timeMax: times.end })).catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CalendarAvailabilityPartialError);
+    expect(error.partialAvailability).toBeUndefined();
+  });
+  it("lists only minimal availability fields without etags, preserving all-day and floating times", async () => {
+    const transport = vi.fn(async () => jsonResponse(transport.mock.calls.length === 1 ? { items: [{ id: "one", summary: "excluded", attendees: [{}], start: { date: "2026-10-26", secret: "excluded" }, end: { date: "2026-10-27" } }], nextPageToken: "next" } : { items: [{ id: "two", status: "confirmed", transparency: "opaque", recurringEventId: "series", originalStartTime: { dateTime: "2026-10-26T10:00:00" }, start: { dateTime: "2026-10-26T10:00:00" }, end: { dateTime: "unresolved" }, description: "excluded" }] }));
+    const events = await Effect.runPromise(provider(transport).listAvailability({ calendarId: "primary", timeMin: times.start, timeMax: times.end }));
+    expect(events).toEqual([{ calendarId: "primary", eventId: "one", start: { date: "2026-10-26" }, end: { date: "2026-10-27" } }, { calendarId: "primary", eventId: "two", status: "confirmed", transparency: "opaque", recurringEventId: "series", originalStartTime: { dateTime: "2026-10-26T10:00:00" }, start: { dateTime: "2026-10-26T10:00:00" }, end: { dateTime: "unresolved" } }]);
+    const url = new URL(String(transport.mock.calls[0]?.[0]));
+    expect(url.searchParams.get("fields")).toBe("nextPageToken,items(id,status,start,end,transparency,recurringEventId,originalStartTime)");
+    expect(String(transport.mock.calls[1]?.[0])).toContain("pageToken=next");
+  });
+  it.each(["token", "identity", "malformed"])("rejects incomplete availability pagination: %s", async mode => {
+    const transport = vi.fn(async () => jsonResponse(mode === "malformed" ? { items: {} } : mode === "token" ? { items: [], nextPageToken: "repeat" } : { items: [{ id: "same" }], nextPageToken: "next" + transport.mock.calls.length }));
+    await expect(Effect.runPromise(provider(transport).listAvailability({ calendarId: "primary", timeMin: times.start, timeMax: times.end }))).rejects.toThrow();
+    expect(transport.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+  it.each([{ error: { reason: "forbidden" } }, { errors: [{ reason: "forbidden" }] }])("does not treat HTTP200 availability errors as an empty calendar", async response => {
+    const transport = vi.fn(async () => jsonResponse(response));
+    await expect(Effect.runPromise(provider(transport).listAvailability({ calendarId: "primary", timeMin: times.start, timeMax: times.end }))).rejects.toThrow("incomplete");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("denies minimal event availability outside the detail allowlist", async () => {
+    const transport = vi.fn(async () => jsonResponse({ items: [] }));
+    const api = createGoogleCalendarProvider({ accessToken: () => Effect.succeed("test-token"), calendarIds: ["primary"], availabilityCalendarIds: ["primary", "busyOnly"], jessEmail: "jess@example.test", fetch: transport });
+    await expect(Effect.runPromise(api.listAvailability({ calendarId: "busyOnly", timeMin: times.start, timeMax: times.end }))).rejects.toThrow("allowlist");
     expect(transport).not.toHaveBeenCalled();
   });
   it("bounds reads, checks calendar allowlists, and paginates", async () => {

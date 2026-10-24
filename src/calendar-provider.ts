@@ -57,6 +57,23 @@ export interface ProviderAvailability {
   timeMax?: string;
 }
 
+export interface ProviderAvailabilityTime {
+  dateTime?: string;
+  date?: string;
+  timeZone?: string;
+}
+
+export interface ProviderAvailabilityEvent {
+  calendarId: string;
+  eventId: string;
+  status?: string;
+  start?: ProviderAvailabilityTime;
+  end?: ProviderAvailabilityTime;
+  transparency?: string;
+  recurringEventId?: string;
+  originalStartTime?: ProviderAvailabilityTime;
+}
+
 export interface CalendarWindow {
   calendarId: string;
   timeMin: string;
@@ -86,6 +103,13 @@ export interface RescheduleInput {
 export class CalendarProviderError extends CliError {
   constructor(readonly code: "conflict" | "unknown-outcome" | "rejected" | "read-failed" | "not-found", message: string, readonly status?: number) {
     super(message);
+  }
+}
+
+export class CalendarAvailabilityPartialError extends CalendarProviderError {
+  readonly kind = "calendar-availability-partial";
+  constructor(readonly partialAvailability: ProviderAvailability, readonly unresolvedCalendarIds: string[]) {
+    super("read-failed", "Calendar availability incomplete; unresolved calendars require explicit fallback");
   }
 }
 
@@ -261,6 +285,52 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
     });
   }
 
+  function listAvailability(input: CalendarWindow) {
+    return Effect.gen(function* () {
+      const path = yield* checked(() => { validateWindow(input.timeMin, input.timeMax); explicitInstant(input.timeMin); explicitInstant(input.timeMax); return eventPath(input.calendarId); });
+      const result: ProviderAvailabilityEvent[] = [];
+      const ids = new Set<string>(), tokens = new Set<string>();
+      let pageToken: string | undefined;
+      let pages = 0;
+      do {
+        if (++pages > 20) return yield* Effect.fail(fail("Calendar availability pagination incomplete"));
+        const params = new URLSearchParams({ timeMin: input.timeMin, timeMax: input.timeMax, singleEvents: "true", orderBy: "startTime", maxResults: "250", fields: "nextPageToken,items(id,status,start,end,transparency,recurringEventId,originalStartTime)" });
+        if (pageToken) params.set("pageToken", pageToken);
+        const raw = yield* request("GET", `${path}?${params}`);
+        const page = yield* checked(() => {
+          if (raw.error !== undefined || raw.errors !== undefined || raw.items !== undefined && !Array.isArray(raw.items)) throw fail("Calendar availability item list is invalid or incomplete");
+          const time = (value: unknown): ProviderAvailabilityTime => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) throw fail("Calendar availability time is invalid");
+            return Object.fromEntries(["dateTime", "date", "timeZone"].flatMap(key => {
+              const field = (value as Record<string, unknown>)[key];
+              if (field !== undefined && typeof field !== "string") throw fail("Calendar availability time field is invalid");
+              return field === undefined ? [] : [[key, field]];
+            }));
+          };
+          const events = (raw.items ?? []).map((item: unknown): ProviderAvailabilityEvent => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) throw fail("Calendar availability item is invalid");
+            const value = item as Record<string, unknown>;
+            if (typeof value.id !== "string" || !value.id || ids.has(value.id)) throw fail("Calendar availability identity is missing or repeated");
+            ids.add(value.id);
+            const fields: Record<string, string> = {};
+            for (const key of ["status", "transparency", "recurringEventId"]) {
+              if (value[key] !== undefined && typeof value[key] !== "string") throw fail("Calendar availability field is invalid");
+              if (value[key] !== undefined) fields[key] = value[key] as string;
+            }
+            return { calendarId: input.calendarId, eventId: value.id, ...fields, ...(value.start === undefined ? {} : { start: time(value.start) }), ...(value.end === undefined ? {} : { end: time(value.end) }), ...(value.originalStartTime === undefined ? {} : { originalStartTime: time(value.originalStartTime) }) };
+          });
+          if (result.length + events.length > MAX_EVENTS) throw fail("Calendar availability result limit exceeded; narrow the window");
+          if (raw.nextPageToken !== undefined && (typeof raw.nextPageToken !== "string" || !raw.nextPageToken || tokens.has(raw.nextPageToken))) throw fail("Calendar availability pagination is invalid or repeated");
+          return { events, nextPageToken: raw.nextPageToken as string | undefined };
+        });
+        result.push(...page.events);
+        pageToken = page.nextPageToken;
+        if (pageToken) tokens.add(pageToken);
+      } while (pageToken);
+      return result;
+    });
+  }
+
   function freeBusy(input: { calendarIds: readonly string[]; timeMin: string; timeMax: string }) {
     return Effect.gen(function* () {
       const window = yield* checked(() => {
@@ -277,12 +347,20 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
         for (const key of ["timeMin", "timeMax"] as const) {
           if (raw[key] !== undefined && explicitInstant(raw[key]) !== (key === "timeMin" ? window.start : window.end)) incomplete();
         }
-        const rows = input.calendarIds.map(id => {
+        const unresolvedCalendarIds: string[] = [];
+        const rows: [string, { busy: ProviderBusyInterval[] }][] = [];
+        for (const id of input.calendarIds) {
           if (!Object.prototype.hasOwnProperty.call(calendars, id)) return incomplete();
           const row = (calendars as Record<string, unknown>)[id];
           if (!row || typeof row !== "object" || Array.isArray(row)) return incomplete();
           const { busy, errors } = row as { busy?: unknown; errors?: unknown };
-          if (errors !== undefined && (!Array.isArray(errors) || errors.length > 0) || !Array.isArray(busy)) return incomplete();
+          if (errors !== undefined && !Array.isArray(errors)) return incomplete();
+          if (Array.isArray(errors) && errors.length > 0) {
+            if (errors.some(error => !error || typeof error !== "object" || Array.isArray(error) || typeof error.domain !== "string" || !error.domain || typeof error.reason !== "string" || !error.reason) || busy !== undefined && (!Array.isArray(busy) || busy.length > 0)) return incomplete();
+            unresolvedCalendarIds.push(id);
+            continue;
+          }
+          if (!Array.isArray(busy)) return incomplete();
           const intervals = (busy as unknown[]).map(item => {
             if (!item || typeof item !== "object" || Array.isArray(item)) return incomplete();
             const { start, end } = item as { start?: unknown; end?: unknown };
@@ -290,9 +368,11 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
             if (a >= b || a < window.start || b > window.end) return incomplete();
             return { start: start as string, end: end as string };
           });
-          return [id, { busy: intervals }] as const;
-        });
-        return { calendars: Object.fromEntries(rows), ...(raw.timeMin === undefined ? {} : { timeMin: raw.timeMin as string }), ...(raw.timeMax === undefined ? {} : { timeMax: raw.timeMax as string }) };
+          rows.push([id, { busy: intervals }]);
+        }
+        const availability: ProviderAvailability = { calendars: Object.fromEntries(rows), ...(raw.timeMin === undefined ? {} : { timeMin: raw.timeMin as string }), ...(raw.timeMax === undefined ? {} : { timeMax: raw.timeMax as string }) };
+        if (unresolvedCalendarIds.length) throw new CalendarAvailabilityPartialError(availability, unresolvedCalendarIds);
+        return availability;
       });
     });
   }
@@ -357,5 +437,5 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
     });
   }
 
-  return { get, list, freeBusy, createPrivate, reschedule, listCalendarMetadata };
+  return { get, list, freeBusy, createPrivate, reschedule, listCalendarMetadata, listAvailability };
 }
