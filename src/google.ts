@@ -666,6 +666,29 @@ export function authStatus(options: {
   });
 }
 
+export function writePrivateOAuthToken(file: string, value: unknown) {
+  return effectSync("save private OAuth token", () => {
+    const target = expandHome(file);
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(temporary, "wx", 0o600);
+      fs.fchmodSync(fd, 0o600);
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("Cannot establish private token permissions");
+      fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = undefined;
+      fs.renameSync(temporary, target);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+      if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    }
+  });
+}
+
 export function persistOAuthLoginConfig(patch: Partial<LocalConfig>, file: string) {
   return Effect.gen(function* () {
     const symlink = yield* effectSync("inspect local config", () => {
@@ -719,7 +742,7 @@ export function authLogin(options: {
       issued_at: new Date().toISOString()
     };
 
-    yield* writeJsonFile(tokenFile, token);
+    yield* writePrivateOAuthToken(tokenFile, token);
     yield* persistOAuthLoginConfig(
       {
         authMode: "user",
