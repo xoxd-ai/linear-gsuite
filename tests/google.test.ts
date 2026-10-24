@@ -602,6 +602,11 @@ describe("bounded assistant calendar provider", () => {
     await expect(Effect.runPromise(provider(transport).listAvailability({ calendarId: "primary", timeMin: times.start, timeMax: times.end }))).rejects.toThrow();
     expect(transport.mock.calls.length).toBeLessThanOrEqual(2);
   });
+  it.each([{ error: { reason: "forbidden" } }, { errors: [{ reason: "forbidden" }] }])("does not treat HTTP200 availability errors as an empty calendar", async response => {
+    const transport = vi.fn(async () => jsonResponse(response));
+    await expect(Effect.runPromise(provider(transport).listAvailability({ calendarId: "primary", timeMin: times.start, timeMax: times.end }))).rejects.toThrow("incomplete");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it("denies minimal event availability outside the detail allowlist", async () => {
     const transport = vi.fn(async () => jsonResponse({ items: [] }));
     const api = createGoogleCalendarProvider({ accessToken: () => Effect.succeed("test-token"), calendarIds: ["primary"], availabilityCalendarIds: ["primary", "busyOnly"], jessEmail: "jess@example.test", fetch: transport });

@@ -22,6 +22,10 @@ fields preserve all-day/floating/unresolved data for consumer normalization.
 No titles, attendees or descriptions returned; get/list remain unchanged.
 
 Validation through fresh SHA-verified qualified heavy helper with default queue,
-unchanged caps and 256MiB Node heap: typecheck, all90 tests, build and publint.
+unchanged caps and 256MiB Node heap: typecheck, all92 tests, build and publint.
 No dependency/config/service/OAuth/event changes. Independent source review and
 root guarded merge precede native artifact and parent-only live acceptance.
+
+Independent review caught HTTP200 top-level error bodies being treated as empty
+availability. Added an explicit error/errors guard before absent-items handling
+and two regression cases; valid empty responses without items remain supported.

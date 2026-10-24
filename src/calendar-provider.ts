@@ -298,7 +298,7 @@ export function createGoogleCalendarProvider(options: GoogleCalendarProviderOpti
         if (pageToken) params.set("pageToken", pageToken);
         const raw = yield* request("GET", `${path}?${params}`);
         const page = yield* checked(() => {
-          if (raw.items !== undefined && !Array.isArray(raw.items)) throw fail("Calendar availability item list is invalid");
+          if (raw.error !== undefined || raw.errors !== undefined || raw.items !== undefined && !Array.isArray(raw.items)) throw fail("Calendar availability item list is invalid or incomplete");
           const time = (value: unknown): ProviderAvailabilityTime => {
             if (!value || typeof value !== "object" || Array.isArray(value)) throw fail("Calendar availability time is invalid");
             return Object.fromEntries(["dateTime", "date", "timeZone"].flatMap(key => {
