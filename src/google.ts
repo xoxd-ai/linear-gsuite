@@ -567,6 +567,7 @@ function buildEventResource(definition: LoadedCalendarDefinition, event: Resolve
   const googleEventId = stableGoogleEventId(event.identityKey);
   const base = {
     id: googleEventId,
+    visibility: "private",
     summary: event.summary,
     description: event.description,
     recurrence: event.recurrence.length > 0 ? event.recurrence : undefined,
@@ -665,6 +666,51 @@ export function authStatus(options: {
   });
 }
 
+export function writePrivateOAuthToken(file: string, value: unknown) {
+  return effectSync("save private OAuth token", () => {
+    const target = expandHome(file);
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(temporary, "wx", 0o600);
+      fs.fchmodSync(fd, 0o600);
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("Cannot establish private token permissions");
+      fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = undefined;
+      fs.renameSync(temporary, target);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+      if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    }
+  });
+}
+
+export function persistOAuthLoginConfig(patch: Partial<LocalConfig>, file: string) {
+  return Effect.gen(function* () {
+    const symlink = yield* effectSync("inspect local config", () => {
+      try { return fs.lstatSync(expandHome(file)).isSymbolicLink(); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+    });
+    if (symlink) {
+      console.warn(`OAuth token saved; managed config left unchanged: ${file}. Keep its declared OAuth paths aligned with the saved token.`);
+      return false;
+    }
+    const result = yield* Effect.result(saveLocalConfig(patch, file));
+    if (result._tag === "Failure") {
+      console.warn(`OAuth token saved; local config could not be updated: ${file}. Update its OAuth paths before unattended use.`);
+      return false;
+    }
+    return true;
+  });
+}
+
 export function authLogin(options: {
   clientSecretsFile?: string;
   tokenFile?: string;
@@ -696,8 +742,8 @@ export function authLogin(options: {
       issued_at: new Date().toISOString()
     };
 
-    yield* writeJsonFile(tokenFile, token);
-    yield* saveLocalConfig(
+    yield* writePrivateOAuthToken(tokenFile, token);
+    yield* persistOAuthLoginConfig(
       {
         authMode: "user",
         oauthClientFile: clientSecretsFile,
@@ -718,7 +764,7 @@ export function authLogin(options: {
     const count = Array.isArray((result.data as Record<string, unknown>).items)
       ? ((result.data as Record<string, unknown>).items as unknown[]).length
       : 0;
-    console.log("Google Calendar desktop OAuth is configured.");
+    console.log("Google Calendar desktop OAuth token and API access verified.");
     console.log(`Saved token: ${tokenFile}`);
     console.log(`Accessible calendars: ${count}`);
   });
