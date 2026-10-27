@@ -18,6 +18,11 @@ pnpm run build       # compile to dist/
 
 Or via nix: `nix develop` gives you node 22, pnpm 9, bazel, and just.
 
+`just build`, `just typecheck` and `just test` use pnpm. Set
+`LINEAR_GSUITE_BUILD=bazel` to run the same steps on local Bazel. That run is
+local and non-qualifying (no flywheel lane is enrolled), and `.bazelrc` stops
+its server after 120 s idle.
+
 ## Architecture
 
 ```
