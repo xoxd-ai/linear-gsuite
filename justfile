@@ -3,7 +3,10 @@ set dotenv-load
 set positional-arguments
 
 root := justfile_directory()
-build_system := env("LINEAR_GSUITE_BUILD", "bazel")
+# pnpm is the default. LINEAR_GSUITE_BUILD=bazel opts in to local,
+# non-qualifying Bazel: no flywheel lane is enrolled, so it starts a local
+# server that .bazelrc bounds (TIN-5770, R471).
+build_system := env("LINEAR_GSUITE_BUILD", "pnpm")
 default: status
 
 [doc("Show local toolchain status")]
@@ -24,6 +27,7 @@ build:
     set -euo pipefail
     cd {{ root }}
     if [[ "{{ build_system }}" == "bazel" ]] && command -v bazel >/dev/null 2>&1; then
+        echo "bazel: local, non-qualifying (R471)" >&2
         bazel build //:pkg
     else
         pnpm build
@@ -35,6 +39,7 @@ typecheck:
     set -euo pipefail
     cd {{ root }}
     if [[ "{{ build_system }}" == "bazel" ]] && command -v bazel >/dev/null 2>&1; then
+        echo "bazel: local, non-qualifying (R471)" >&2
         bazel build //:typecheck
     else
         pnpm typecheck
@@ -46,6 +51,7 @@ test:
     set -euo pipefail
     cd {{ root }}
     if [[ "{{ build_system }}" == "bazel" ]] && command -v bazel >/dev/null 2>&1; then
+        echo "bazel: local, non-qualifying (R471)" >&2
         bazel test //:test
     else
         pnpm test
